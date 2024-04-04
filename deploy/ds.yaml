@@ -25,7 +25,7 @@ spec:
         operator: 'Exists'
       containers:
       - name: pod-netstat-exporter
-        image: quay.io/wish/pod-netstat-exporter:latest
+        image: pod-netstat-exporter:latest
         imagePullPolicy: Always
         command: ['/root/pod-netstat-exporter']
         env:

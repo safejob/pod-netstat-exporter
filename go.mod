@@ -1,4 +1,4 @@
-module github.com/wish/pod-netstat-exporter
+module github.com/eegseth/pod-netstat-exporter
 
 go 1.13
 
