@@ -10,8 +10,9 @@ WORKDIR /go/src/github.com/eegseth/pod-netstat-exporter
 # Cache dependencies
 COPY go.mod .
 COPY go.sum .
-RUN go get github.com/eegseth/pod-netstat-exporter
+
 RUN go mod download
+
 
 COPY . /go/src/github.com/eegseth/pod-netstat-exporter/
 
