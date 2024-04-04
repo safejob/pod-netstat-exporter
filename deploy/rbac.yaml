@@ -1,8 +1,26 @@
----
 apiVersion: v1
 kind: Namespace
 metadata:
   name: pod-netstat-exporter
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+ namespace: pod-netstat-exporter
+ name: pod-netstat-exporter-role
+rules:
+- apiGroups: [""]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: [""]
+  resources:
+  - nodes/log
+  - nodes/metrics
+  - nodes/proxy
+  - nodes/spec
+  - nodes/stats
+  verbs:
+  - 'get'
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -11,3 +29,18 @@ metadata:
   namespace: pod-netstat-exporter
   labels:
     app: pod-netstat-exporter
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+ name: pod-netstat-exporter-binding
+ namespace: pod-netstat-exporter
+subjects:
+- kind: ServiceAccount
+  name: pod-netstat-exporter
+  namespace: pod-netstat-exporter
+roleRef:
+ kind: ClusterRole
+ name: pod-netstat-exporter-role
+ apiGroup: rbac.authorization.k8s.io
+---

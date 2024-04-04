@@ -12,7 +12,7 @@ import (
 
 // ContainerToPID finds the PID of the given container
 func ContainerToPID(hostMountPath, container string) (int, error) {
-	raw := strings.Replace(container, "docker://", "", 1)
+	raw := strings.Replace(container, "containerd://", "", 1)
 	return getPidForContainer(hostMountPath, raw)
 }
 
@@ -49,19 +49,7 @@ func findCgroupMountpoint(hostMountPath, cgroupType string) (string, error) {
 // borrowed from docker/utils/utils.go
 // modified to get the docker pid instead of using /proc/self
 func getThisCgroup(hostMountPath, cgroupType string) (string, error) {
-	dockerpid, err := ioutil.ReadFile(hostMountPath + "/var/run/docker.pid")
-	if err != nil {
-		return "", err
-	}
-	result := strings.Split(string(dockerpid), "\n")
-	if len(result) == 0 || len(result[0]) == 0 {
-		return "", fmt.Errorf("docker pid not found in %s/var/run/docker.pid", hostMountPath)
-	}
-	pid, err := strconv.Atoi(result[0])
-	if err != nil {
-		return "", err
-	}
-	output, err := ioutil.ReadFile(fmt.Sprintf(hostMountPath+"/proc/%d/cgroup", pid))
+	output, err := ioutil.ReadFile(fmt.Sprintf(hostMountPath + "/proc/self/cgroup"))
 	if err != nil {
 		return "", err
 	}
@@ -72,7 +60,7 @@ func getThisCgroup(hostMountPath, cgroupType string) (string, error) {
 			return parts[2], nil
 		}
 	}
-	return "", fmt.Errorf("cgroup '%s' not found in %s/proc/%d/cgroup", cgroupType, hostMountPath, pid)
+	return "", fmt.Errorf("cgroup '%s' not found in %s/proc/%s/cgroup", cgroupType, hostMountPath, cgroupType)
 }
 
 // Returns the first pid in a container.
