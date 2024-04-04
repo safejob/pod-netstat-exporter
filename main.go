@@ -17,9 +17,6 @@ import (
 	"github.com/eegseth/pod-netstat-exporter/pkg/metrics"
 	"github.com/eegseth/pod-netstat-exporter/pkg/netstat"
 
-	"context"
-	"fmt"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -76,7 +73,7 @@ func allPodStats(opts *ops) ([]*metrics.PodStats, error) {
 		panic(err.Error())
 	}
 
-	p, err := clientset.CoreV1().Pods("").List(metav1.ListOptions{})
+	p, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return podStats, fmt.Errorf("Error getting pod list: %v", err)
 	}

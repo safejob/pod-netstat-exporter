@@ -29,6 +29,5 @@ func client() {
 		}
 		fmt.Printf("There are %d pods in the cluster\n", len(pods.Items))
 
-		return &pods
 	}
 }
