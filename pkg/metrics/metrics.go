@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/eegseth/pod-netstat-exporter/pkg/netstat"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/sirupsen/logrus"
-	"github.com/wish/pod-netstat-exporter/pkg/netstat"
 )
 
 const (
