@@ -12,7 +12,7 @@ COPY go.mod .
 COPY go.sum .
 RUN go mod download
 
-COPY . /go/src/github.com/eegesth/pod-netstat-exporter/
+COPY . /go/src/github.com/eegseth/pod-netstat-exporter/
 
 RUN CGO_ENABLED=0 GOARCH=${TARGETARCH} GOOS=${TARGETOS} go build -o ./pod-netstat-exporter -a -installsuffix cgo .
 
