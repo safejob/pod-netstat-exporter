@@ -68,6 +68,7 @@ func netstatsFromProc(rootFs string, pid int, file string) (NetStats, error) {
 	if err != nil {
 		return stats, fmt.Errorf("failure opening %s: %v", statsFile, err)
 	}
+	defer r.Close()
 
 	return parseNetStats(r)
 }
@@ -115,6 +116,7 @@ func snmp6FromProc(rootFs string, pid int, file string) (NetStats, error) {
 	if err != nil {
 		return stats, fmt.Errorf("failure opening %s: %v", statsFile, err)
 	}
+	defer r.Close()
 
 	return parseSNMP6Stats(r)
 }
@@ -156,6 +158,7 @@ func sockstatsFromProc(rootFs string, pid int, file string) (NetStats, error) {
 	if err != nil {
 		return stats, fmt.Errorf("failure opening %s: %v", statsFile, err)
 	}
+	defer r.Close()
 
 	return parseSockStats(r)
 }

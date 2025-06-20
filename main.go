@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/jessevdk/go-flags"
 	"github.com/sirupsen/logrus"
@@ -20,6 +23,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	_ "net/http/pprof"
 )
 
 type ops struct {
@@ -59,21 +64,32 @@ func getPodNetstats(opts *ops, pod *core_v1.Pod) (*netstat.NetStats, error) {
 	return &stats, err
 }
 
+var podStatsPool = sync.Pool{
+	New: func() interface{} {
+		return make([]*metrics.PodStats, 0, 100)
+	},
+}
+
 func allPodStats(opts *ops) ([]*metrics.PodStats, error) {
-	podStats := []*metrics.PodStats{}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// creates the in-cluster config
-	config, err := rest.InClusterConfig()
+	podStats := podStatsPool.Get().([]*metrics.PodStats)
+	defer func() {
+		// 清理切片中的指针引用
+		for i := range podStats {
+			podStats[i] = nil
+		}
+		podStats = podStats[:0]
+		podStatsPool.Put(podStats)
+	}()
+
+	clientset, err := getK8sClient()
 	if err != nil {
 		panic(err.Error())
 	}
-	// creates the clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		panic(err.Error())
-	}
 
-	p, err := clientset.CoreV1().Pods("").List(context.TODO(), metav1.ListOptions{})
+	p, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return podStats, fmt.Errorf("Error getting pod list: %v", err)
 	}
@@ -145,6 +161,8 @@ func main() {
 		}
 	}()
 
+	startMemoryMonitor()
+
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
@@ -156,4 +174,35 @@ func main() {
 	logrus.Info("Received SIGTERM or SIGINT. Shutting down.")
 	srv.Shutdown(context.Background())
 
+}
+
+var (
+	k8sClient kubernetes.Interface
+	k8sOnce   sync.Once
+)
+
+func getK8sClient() (kubernetes.Interface, error) {
+	var err error
+	k8sOnce.Do(func() {
+		config, configErr := rest.InClusterConfig()
+		if configErr != nil {
+			err = configErr
+			return
+		}
+		k8sClient, err = kubernetes.NewForConfig(config)
+	})
+	return k8sClient, err
+}
+
+func startMemoryMonitor() {
+	ticker := time.NewTicker(30 * time.Second)
+	go func() {
+		for range ticker.C {
+			runtime.GC() // 强制垃圾回收
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			logrus.Infof("Memory usage: Alloc=%d KB, TotalAlloc=%d KB, Sys=%d KB, NumGC=%d",
+				m.Alloc/1024, m.TotalAlloc/1024, m.Sys/1024, m.NumGC)
+		}
+	}()
 }
