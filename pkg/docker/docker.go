@@ -63,78 +63,185 @@ func getThisCgroup(hostMountPath, cgroupType string) (string, error) {
 	return "", fmt.Errorf("cgroup '%s' not found in %s/proc/%s/cgroup", cgroupType, hostMountPath, cgroupType)
 }
 
+// readPidFromFile reads the first PID from a cgroup tasks file
+func readPidFromFile(filename string) (int, error) {
+	output, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return 0, err
+	}
+
+	result := strings.Split(string(output), "\n")
+	if len(result) == 0 || len(result[0]) == 0 {
+		return 0, fmt.Errorf("No pid found in file %s", filename)
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(result[0]))
+	if err != nil {
+		return 0, fmt.Errorf("Invalid pid '%s': %s", result[0], err)
+	}
+
+	return pid, nil
+}
+
+// detectContainerRuntime tries to detect if we're dealing with containerd or docker
+func detectContainerRuntime(hostMountPath string) string {
+	// Check for containerd socket
+	if _, err := ioutil.ReadFile(hostMountPath + "/run/containerd/containerd.sock"); err == nil {
+		return "containerd"
+	}
+
+	// Check for docker socket
+	if _, err := ioutil.ReadFile(hostMountPath + "/var/run/docker.sock"); err == nil {
+		return "docker"
+	}
+
+	// Check systemd services
+	output, err := ioutil.ReadFile(hostMountPath + "/proc/1/cgroup")
+	if err == nil {
+		if strings.Contains(string(output), "containerd") {
+			return "containerd"
+		}
+		if strings.Contains(string(output), "docker") {
+			return "docker"
+		}
+	}
+
+	// Default to trying both
+	return "unknown"
+}
+
 // Returns the first pid in a container.
-// borrowed from docker/utils/utils.go
-// modified to only return the first pid
-// modified to glob with id
-// modified to search for newer docker containers
+// Modified to support both Docker and containerd
 func getPidForContainer(hostMountPath, id string) (int, error) {
-	pid := 0
+	logrus.Tracef("Looking for container %s PID", id)
 
-	// memory is chosen randomly, any cgroup used by docker works
 	cgroupType := "memory"
-
 	cgroupRoot, err := findCgroupMountpoint(hostMountPath, cgroupType)
 	if err != nil {
-		return pid, err
+		return 0, err
 	}
 
 	cgroupThis, err := getThisCgroup(hostMountPath, cgroupType)
 	if err != nil {
-		return pid, err
+		// For containerd, we can continue without cgroupThis
+		logrus.Tracef("Could not get current cgroup, continuing: %v", err)
+		cgroupThis = ""
 	}
 
-	id += "*"
+	runtime := detectContainerRuntime(hostMountPath)
+	logrus.Tracef("Detected container runtime: %s", runtime)
 
-	attempts := []string{
+	// Build comprehensive list of attempts for both containerd and docker
+	var attempts []string
+
+	// Containerd patterns (try these first as they're more specific)
+	containerdAttempts := []string{
+		// Kubernetes with containerd - cgroup v1 patterns
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods", "besteffort", "pod*", "*"+id+"*", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods", "burstable", "pod*", "*"+id+"*", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods", "guaranteed", "pod*", "*"+id+"*", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods", "pod*", "*"+id+"*", "tasks"),
+
+		// systemd slice patterns for containerd
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-besteffort.slice", "kubepods-besteffort-pod*.slice", "cri-containerd-"+id+"*.scope", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod*.slice", "cri-containerd-"+id+"*.scope", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-guaranteed.slice", "kubepods-guaranteed-pod*.slice", "cri-containerd-"+id+"*.scope", "tasks"),
+
+		// More containerd systemd patterns
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-besteffort.slice", "*", "cri-containerd-"+id+"*.scope", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-burstable.slice", "*", "cri-containerd-"+id+"*.scope", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "*", "cri-containerd-"+id+"*.scope", "tasks"),
+
+		// Alternative containerd patterns
+		filepath.Join(hostMountPath, cgroupRoot, "system.slice", "containerd.service", "*", id+"*", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "system.slice", "containerd.service", "tasks"),
+
+		// Direct containerd patterns
+		filepath.Join(hostMountPath, cgroupRoot, "containerd", "*"+id+"*", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "containerd.service", "*"+id+"*", "tasks"),
+
+		// Shortened container ID patterns (containerd sometimes uses shorter IDs)
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods", "*", "*"+id[:12]+"*", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "*", "*"+id[:12]+"*", "tasks"),
+	}
+
+	// Add relative paths if cgroupThis is available
+	if cgroupThis != "" {
+		containerdAttempts = append(containerdAttempts, []string{
+			filepath.Join(hostMountPath, cgroupRoot, cgroupThis, "kubepods", "besteffort", "pod*", "*"+id+"*", "tasks"),
+			filepath.Join(hostMountPath, cgroupRoot, cgroupThis, "kubepods", "burstable", "pod*", "*"+id+"*", "tasks"),
+			filepath.Join(hostMountPath, cgroupRoot, cgroupThis, "kubepods", "guaranteed", "pod*", "*"+id+"*", "tasks"),
+			filepath.Join(hostMountPath, cgroupRoot, cgroupThis, "containerd", "*"+id+"*", "tasks"),
+			filepath.Join(hostMountPath, cgroupRoot, cgroupThis, "*"+id+"*", "tasks"),
+		}...)
+	}
+
+	// Docker patterns (original logic with wildcard adjustment)
+	idWithWildcard := id + "*"
+	dockerAttempts := []string{
 		// Kubernetes with docker and CNI is even more different
-		filepath.Join(hostMountPath, cgroupRoot, "..", "systemd", "kubepods", "*", "pod*", id, "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "..", "systemd", "kubepods", "*", "pod*", idWithWildcard, "tasks"),
 		// Another flavor of containers location in recent kubernetes 1.11+
-		filepath.Join(hostMountPath, cgroupRoot, cgroupThis, "kubepods.slice", "kubepods-besteffort.slice", "*", "docker-"+id+".scope", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, cgroupThis, "kubepods.slice", "kubepods-besteffort.slice", "*", "docker-"+idWithWildcard+".scope", "tasks"),
 		// When runs inside of a container with recent kubernetes 1.11+
-		filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-besteffort.slice", "*", "docker-"+id+".scope", "tasks"),
-		filepath.Join(hostMountPath, cgroupRoot, cgroupThis, id, "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-besteffort.slice", "*", "docker-"+idWithWildcard+".scope", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, cgroupThis, idWithWildcard, "tasks"),
 		// With more recent lxc versions use, cgroup will be in lxc/
-		filepath.Join(hostMountPath, cgroupRoot, cgroupThis, "lxc", id, "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, cgroupThis, "lxc", idWithWildcard, "tasks"),
 		// With more recent docker, cgroup will be in docker/
-		filepath.Join(hostMountPath, cgroupRoot, cgroupThis, "docker", id, "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, cgroupThis, "docker", idWithWildcard, "tasks"),
 		// Even more recent docker versions under systemd use docker-<id>.scope/
-		filepath.Join(hostMountPath, cgroupRoot, "system.slice", "docker-"+id+".scope", "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "system.slice", "docker-"+idWithWildcard+".scope", "tasks"),
 		// Even more recent docker versions under cgroup/systemd/docker/<id>/
-		filepath.Join(hostMountPath, cgroupRoot, "..", "systemd", "docker", id, "tasks"),
+		filepath.Join(hostMountPath, cgroupRoot, "..", "systemd", "docker", idWithWildcard, "tasks"),
+	}
+
+	// Prioritize attempts based on detected runtime
+	if runtime == "containerd" {
+		attempts = append(containerdAttempts, dockerAttempts...)
+	} else {
+		attempts = append(dockerAttempts, containerdAttempts...)
 	}
 
 	var filename string
+	var matchedFiles []string
+
 	for _, attempt := range attempts {
-		filenames, _ := filepath.Glob(attempt)
+		filenames, err := filepath.Glob(attempt)
+		if err != nil {
+			logrus.Tracef("Error globbing %s: %v", attempt, err)
+			continue
+		}
+
+		logrus.Tracef("Checking path: %s, found: %v", attempt, filenames)
+
 		if len(filenames) > 1 {
-			return pid, fmt.Errorf("Ambiguous id supplied: %v", filenames)
+			// If we have multiple matches, try to find the most specific one
+			for _, fn := range filenames {
+				if strings.Contains(fn, id) {
+					matchedFiles = append(matchedFiles, fn)
+				}
+			}
+			if len(matchedFiles) == 1 {
+				filename = matchedFiles[0]
+				break
+			} else if len(matchedFiles) > 1 {
+				// Still ambiguous, but take the first one
+				logrus.Tracef("Multiple matches found, using first: %v", matchedFiles)
+				filename = matchedFiles[0]
+				break
+			}
+			// If no specific matches, continue to next attempt
 		} else if len(filenames) == 1 {
 			filename = filenames[0]
 			break
 		}
 	}
 
-	logrus.Tracef("Looking for container %v pid in %v", id, filename)
-
 	if filename == "" {
-		return pid, fmt.Errorf("Unable to find container: %v", id[:len(id)-1])
+		return 0, fmt.Errorf("Unable to find container: %v (tried %d different cgroup patterns)", id, len(attempts))
 	}
 
-	output, err := ioutil.ReadFile(filename)
-	if err != nil {
-		return pid, err
-	}
-
-	result := strings.Split(string(output), "\n")
-	if len(result) == 0 || len(result[0]) == 0 {
-		return pid, fmt.Errorf("No pid found for container")
-	}
-
-	pid, err = strconv.Atoi(result[0])
-	if err != nil {
-		return pid, fmt.Errorf("Invalid pid '%s': %s", result[0], err)
-	}
-
-	return pid, nil
+	logrus.Tracef("Found cgroup file for container %s: %s", id, filename)
+	return readPidFromFile(filename)
 }
