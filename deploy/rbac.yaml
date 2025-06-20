@@ -9,18 +9,28 @@ metadata:
  namespace: pod-netstat-exporter
  name: pod-netstat-exporter-role
 rules:
-- apiGroups: [""]
-  resources: ["*"]
-  verbs: ["*"]
-- apiGroups: [""]
-  resources:
-  - nodes/log
-  - nodes/metrics
-  - nodes/proxy
-  - nodes/spec
-  - nodes/stats
-  verbs:
-  - 'get'
+  - verbs:
+      - get
+      - list
+    apiGroups:
+      - ''
+    resources:
+      - nodes/proxy
+  - verbs:
+      - get
+      - list
+      - watch
+    apiGroups:
+      - ''
+    resources:
+      - pods
+  - verbs:
+      - get
+      - list
+    apiGroups:
+      - ''
+    resources:
+      - nodes
 ---
 apiVersion: v1
 kind: ServiceAccount
