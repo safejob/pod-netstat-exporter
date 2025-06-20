@@ -18,7 +18,7 @@ spec:
       serviceAccountName: pod-netstat-exporter
       hostNetwork: true
       hostPID: true
-      tolerations: 
+      tolerations:
       - key: 'node-role.kubernetes.io/master'
         effect: 'NoSchedule'
       - key: 'CriticalAddonsOnly'
@@ -29,6 +29,11 @@ spec:
         imagePullPolicy: Always
         command: ['/root/pod-netstat-exporter']
         env:
+        # 必须配置这个变量
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
         - name: 'KUBELET_API'
           value: 'https://localhost:10250/pods'
         - name: 'KUBELET_API_INSECURE_SKIP_VERIFY'
@@ -51,7 +56,7 @@ spec:
           httpGet:
             path: '/'
             port: 9657
-        volumeMounts: 
+        volumeMounts:
         - name: 'hproc'
           mountPath: '/host/proc'
         - name: 'hsys'
@@ -60,11 +65,11 @@ spec:
           mountPath: '/host/var/run'
       volumes:
       - name: 'hproc'
-        hostPath: 
+        hostPath:
           path: '/proc'
       - name: 'hsys'
-        hostPath: 
+        hostPath:
           path: '/sys'
       - name: 'hvr'
-        hostPath: 
+        hostPath:
           path: '/var/run'
