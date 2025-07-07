@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/eegseth/pod-netstat-exporter/pkg/netstat"
@@ -59,8 +61,9 @@ func generateMetrics(stats []*PodStats) []*dto.MetricFamily {
 			}
 			family.Metric = append(family.Metric, &dto.Metric{
 				Label: []*dto.LabelPair{
-					&dto.LabelPair{Name: s("pod_namespace"), Value: &podStat.Namespace},
-					&dto.LabelPair{Name: s("pod_name"), Value: &podStat.Name},
+					{Name: s("namespace"), Value: &podStat.Namespace},
+					{Name: s("pod"), Value: &podStat.Name},
+					{Name: s("svc"), Value: getSvcName(podStat.Name)},
 				},
 				Gauge:       &dto.Gauge{Value: f(metricValue)},
 				TimestampMs: &timeMs,
@@ -73,6 +76,49 @@ func generateMetrics(stats []*PodStats) []*dto.MetricFamily {
 		ret = append(ret, metric)
 	}
 	return ret
+}
+
+func getSvcName(podName string) *string {
+	if podName == "" {
+		return nil
+	}
+
+	parts := strings.Split(podName, "-")
+	if len(parts) < 2 {
+		return &podName
+	}
+
+	lastPart := parts[len(parts)-1]
+
+	// 规则1：StatefulSet - 最后一段长度 <= 2 且为数字
+	if len(lastPart) <= 2 && isNumeric(lastPart) {
+		result := strings.Join(parts[:len(parts)-1], "-")
+		return &result
+	}
+
+	// 规则2：Deployment - 最后两段长度分别为 10 和 5
+	if len(parts) >= 2 {
+		secondLastPart := parts[len(parts)-2]
+		if len(secondLastPart) == 10 && len(lastPart) == 5 {
+			result := strings.Join(parts[:len(parts)-2], "-")
+			return &result
+		}
+	}
+
+	// 规则3：DaemonSet - 最后一段长度为 5
+	if len(lastPart) == 5 {
+		result := strings.Join(parts[:len(parts)-1], "-")
+		return &result
+	}
+
+	// 如果都不匹配，返回原始名称
+	return &podName
+}
+
+// isNumeric 检查字符串是否为纯数字
+func isNumeric(s string) bool {
+	_, err := strconv.Atoi(s)
+	return err == nil
 }
 
 // Handler returns metrics in response to an HTTP request
