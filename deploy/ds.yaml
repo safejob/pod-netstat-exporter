@@ -1,11 +1,8 @@
----
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  labels:
-    app: pod-netstat-exporter
   name: pod-netstat-exporter
-  namespace: pod-netstat-exporter
+  namespace: monitoring
 spec:
   selector:
     matchLabels:
@@ -15,61 +12,174 @@ spec:
       labels:
         app: pod-netstat-exporter
     spec:
-      serviceAccountName: pod-netstat-exporter
-      hostNetwork: true
-      hostPID: true
-      tolerations:
-      - key: 'node-role.kubernetes.io/master'
-        effect: 'NoSchedule'
-      - key: 'CriticalAddonsOnly'
-        operator: 'Exists'
-      containers:
-      - name: pod-netstat-exporter
-        image: lanekassen.azurecr.io/pod-netstat-exporter:0.1
-        imagePullPolicy: Always
-        command: ['/root/pod-netstat-exporter']
-        env:
-        # 必须配置这个变量
-        - name: NODE_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: spec.nodeName
-        - name: 'KUBELET_API'
-          value: 'https://localhost:10250/pods'
-        - name: 'KUBELET_API_INSECURE_SKIP_VERIFY'
-          value: 'true'
-        - name: BIND_ADDRESS
-          value: ':9657'
-        - name: RATE_LIMIT
-          value: '3'
-        - name: HOST_MOUNT_PATH
-          value: '/host'
-        ports:
-        - name: 'metrics'
-          containerPort: 9657
-          protocol: 'TCP'
-        livenessProbe:
-          httpGet:
-            path: '/'
-            port: 9657
-        readinessProbe:
-          httpGet:
-            path: '/'
-            port: 9657
-        volumeMounts:
-        - name: 'hproc'
-          mountPath: '/host/proc'
-        - name: 'hsys'
-          mountPath: '/host/sys'
-        - name: 'hvr'
-          mountPath: '/host/var/run'
       volumes:
-      - name: 'hproc'
-        hostPath:
-          path: '/proc'
-      - name: 'hsys'
-        hostPath:
-          path: '/sys'
-      - name: 'hvr'
-        hostPath:
-          path: '/var/run'
+        - name: hproc
+          hostPath:
+            path: /proc
+            type: ''
+        - name: hsys
+          hostPath:
+            path: /sys
+            type: ''
+        - name: hvr
+          hostPath:
+            path: /var/run
+            type: ''
+        - name: timezone
+          hostPath:
+            path: /usr/share/zoneinfo/Asia/Shanghai
+            type: ''
+      containers:
+        - name: pod-netstat-exporter
+          image: >-
+            mw-registry-registry-vpc.cn-shanghai.cr.aliyuncs.com/mwprod/pod-netstat-exporter:20250622
+          command:
+            - /root/pod-netstat-exporter
+            - '--log-level=info'
+          ports:
+            - name: http
+              hostPort: 9657
+              containerPort: 9657
+              protocol: TCP
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: KUBELET_API
+              value: https://localhost:10250/pods
+            - name: KUBELET_API_INSECURE_SKIP_VERIFY
+              value: 'true'
+            - name: BIND_ADDRESS
+              value: ':9657'
+            - name: RATE_LIMIT
+              value: '3'
+            - name: HOST_MOUNT_PATH
+              value: /host
+          resources:
+            limits:
+              cpu: 500m
+              memory: 500Mi
+            requests:
+              cpu: 50m
+              memory: 100Mi
+          volumeMounts:
+            - name: hproc
+              mountPath: /host/proc
+            - name: hsys
+              mountPath: /host/sys
+            - name: hvr
+              mountPath: /host/var/run
+            - name: timezone
+              mountPath: /etc/localtime
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9657
+              scheme: HTTP
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9657
+              scheme: HTTP
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: Always
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      hostNetwork: true
+      serviceAccountName: pod-netstat-exporter
+      hostPID: true
+      securityContext: {}
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+        - key: CriticalAddonsOnly
+          operator: Exists
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 50%
+      maxSurge: 0
+  revisionHistoryLimit: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pod-netstat-exporter
+  namespace: monitoring
+  labels:
+    k8s-app: pod-netstat-exporter
+spec:
+  ports:
+    - name: http
+      protocol: TCP
+      port: 9657
+      targetPort: http
+  selector:
+    app: pod-netstat-exporter
+  type: ClusterIP
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pod-netstat-exporter
+  labels:
+    app: pod-netstat-exporter
+subjects:
+  - kind: ServiceAccount
+    name: pod-netstat-exporter
+    namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pod-netstat-exporter
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pod-netstat-exporter
+  labels:
+    app: pod-netstat-exporter
+rules:
+  - verbs:
+      - get
+      - list
+    apiGroups:
+      - ''
+    resources:
+      - nodes/proxy
+  # 添加 pods 权限
+  - verbs:
+      - get
+      - list
+      - watch
+    apiGroups:
+      - ''
+    resources:
+      - pods
+  # 添加 nodes 权限（通常也需要）
+  - verbs:
+      - get
+      - list
+    apiGroups:
+      - ''
+    resources:
+      - nodes
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pod-netstat-exporter
+  namespace: monitoring
+  labels:
+    app: pod-netstat-exporter
