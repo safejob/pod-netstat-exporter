@@ -96,10 +96,10 @@ func getSvcName(podName string) *string {
 		return &result
 	}
 
-	// 规则2：Deployment - 最后两段长度分别为 10 和 5
+	// 规则2：Deployment - 最后两段长度分别为 10/9 和 5
 	if len(parts) >= 2 {
 		secondLastPart := parts[len(parts)-2]
-		if len(secondLastPart) == 10 && len(lastPart) == 5 {
+		if (len(secondLastPart) == 10 || len(secondLastPart) == 9) && len(lastPart) == 5 {
 			result := strings.Join(parts[:len(parts)-2], "-")
 			return &result
 		}
