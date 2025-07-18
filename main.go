@@ -32,7 +32,7 @@ type ops struct {
 	LogLevel      string  `long:"log-level" env:"LOG_LEVEL" description:"Log level" default:"info"`
 	RateLimit     float64 `long:"rate-limit" env:"RATE_LIMIT" description:"The number of /metrics requests served per second" default:"3"`
 	BindAddr      string  `long:"bind-address" short:"p" env:"BIND_ADDRESS" default:":9657" description:"address for binding metrics listener"`
-	HostMountPath string  `long:"host-mount-path" env:"HOST_MOUNT_PATH" default:"/host" description:"The path where the host filesystem is mounted"`
+	HostMountPath string  `long:"host-mount-path" env:"HOST_MOUNT_PATH" default:"/host" description:"The path where the host filesystem is mounted"` // 宿主机proc、sys、var目录在容器中的挂载目录
 	NodeName      string  `long:"node-name" env:"NODE_NAME" description:"Current node name (should be set via downward API)"`
 }
 
@@ -313,6 +313,7 @@ func (pm *PodManager) getPodNetstats(pod *core_v1.Pod) (*netstat.NetStats, error
 	}
 
 	// 找到第一个运行中的容器
+	// todo 如果是多容器的Pod 存在第一个container不是主容器的情况
 	var containerID string
 	for _, containerStatus := range pod.Status.ContainerStatuses {
 		if containerStatus.State.Running != nil {

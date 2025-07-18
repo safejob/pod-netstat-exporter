@@ -55,6 +55,16 @@ func GetStats(rootFs string, pid int) (NetStats, error) {
 	for k, v := range sock6Stats {
 		stats[k] = v
 	}
+
+	// 添加线程数的采集
+	threadStats, err := statusFromProc(rootFs, pid, "status")
+	if err != nil {
+		return stats, err
+	}
+	for k, v := range threadStats {
+		stats[k] = v
+	}
+
 	return stats, nil
 }
 
@@ -180,6 +190,43 @@ func parseSockStats(r io.Reader) (NetStats, error) {
 			i++
 		}
 
+	}
+	return stats, nil
+}
+
+// 读取 /proc/x/status中的Threads
+// pod_netstat_Threads_Cnt{namespace="pre",pod="erp-dataroute-6c8c77f456-wszp5",svc="erp-dataroute"} 132 1752822796000
+func statusFromProc(rootFs string, pid int, file string) (NetStats, error) {
+	var err error
+	var stats NetStats
+
+	statsFile := path.Join(rootFs, "proc", strconv.Itoa(pid), file)
+
+	r, err := os.Open(statsFile)
+	if err != nil {
+		return stats, fmt.Errorf("failure opening %s: %v", statsFile, err)
+	}
+	defer r.Close()
+
+	return parseThreadStats(r)
+}
+func parseThreadStats(r io.Reader) (NetStats, error) {
+	var stats = NetStats{}
+	s := bufio.NewScanner(r)
+	for s.Scan() {
+		fields := strings.Split(s.Text(), "\t")
+		metric := strings.TrimSuffix(fields[0], ":")
+		if metric != "Threads" {
+			continue
+		}
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("error: %s", s.Text())
+		}
+		value, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		stats[metric+"_Cnt"] = int64(value)
 	}
 	return stats, nil
 }
