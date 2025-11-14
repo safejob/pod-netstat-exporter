@@ -25,6 +25,7 @@ func ContainerToPID(hostMountPath, container string) (int, error) {
 ///////////////////////////////////////////////////////////////////////
 
 // borrowed from docker/utils/utils.go
+// Modified to support both cgroup v1 and v2
 func findCgroupMountpoint(hostMountPath, cgroupType string) (string, error) {
 	output, err := ioutil.ReadFile(hostMountPath + "/proc/mounts")
 	if err != nil {
@@ -32,13 +33,23 @@ func findCgroupMountpoint(hostMountPath, cgroupType string) (string, error) {
 	}
 
 	// /proc/mounts has 6 fields per line, one mount per line, e.g.
-	// cgroup /sys/fs/cgroup/devices cgroup rw,relatime,devices 0 0
+	// cgroup v1: cgroup /sys/fs/cgroup/memory cgroup rw,relatime,memory 0 0
+	// cgroup v2: cgroup2 /sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime 0 0
 	for _, line := range strings.Split(string(output), "\n") {
 		parts := strings.Split(line, " ")
-		if len(parts) == 6 && parts[2] == "cgroup" {
-			for _, opt := range strings.Split(parts[3], ",") {
-				if opt == cgroupType {
-					return parts[1], nil
+		if len(parts) == 6 {
+			// Check for cgroup v2 (unified hierarchy)
+			if parts[2] == "cgroup2" {
+				logrus.Tracef("Found cgroup v2 mountpoint: %s", parts[1])
+				return parts[1], nil
+			}
+			// Check for cgroup v1
+			if parts[2] == "cgroup" {
+				for _, opt := range strings.Split(parts[3], ",") {
+					if opt == cgroupType {
+						logrus.Tracef("Found cgroup v1 mountpoint for %s: %s", cgroupType, parts[1])
+						return parts[1], nil
+					}
 				}
 			}
 		}
@@ -50,6 +61,7 @@ func findCgroupMountpoint(hostMountPath, cgroupType string) (string, error) {
 // Returns the relative path to the cgroup docker is running in.
 // borrowed from docker/utils/utils.go
 // modified to get the docker pid instead of using /proc/self
+// Modified to support both cgroup v1 and v2
 func getThisCgroup(hostMountPath, cgroupType string) (string, error) {
 	output, err := ioutil.ReadFile(fmt.Sprintf(hostMountPath + "/proc/self/cgroup"))
 	if err != nil {
@@ -57,15 +69,24 @@ func getThisCgroup(hostMountPath, cgroupType string) (string, error) {
 	}
 	for _, line := range strings.Split(string(output), "\n") {
 		parts := strings.Split(line, ":")
-		// any type used by docker should work
+		if len(parts) < 3 {
+			continue
+		}
+		// For cgroup v2, the format is: 0::/path
+		if parts[0] == "0" && parts[1] == "" {
+			logrus.Tracef("Found cgroup v2 path: %s", parts[2])
+			return parts[2], nil
+		}
+		// For cgroup v1, any type used by docker should work
 		if parts[1] == cgroupType {
+			logrus.Tracef("Found cgroup v1 path for %s: %s", cgroupType, parts[2])
 			return parts[2], nil
 		}
 	}
-	return "", fmt.Errorf("cgroup '%s' not found in %s/proc/%s/cgroup", cgroupType, hostMountPath, cgroupType)
+	return "", fmt.Errorf("cgroup '%s' not found in %s/proc/self/cgroup", cgroupType, hostMountPath)
 }
 
-// readPidFromFile reads the first PID from a cgroup tasks file
+// readPidFromFile reads the first PID from a cgroup tasks file or cgroup.procs file
 func readPidFromFile(filename string) (int, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -89,6 +110,52 @@ func readPidFromFile(filename string) (int, error) {
 	}
 
 	return pid, nil
+}
+
+// findCgroupFileRecursive recursively searches for cgroup files containing the container ID
+func findCgroupFileRecursive(baseDir, containerId, filename string, maxDepth int) (string, error) {
+	if maxDepth <= 0 {
+		return "", fmt.Errorf("max depth reached")
+	}
+
+	// Try to find the file in current directory
+	targetFile := filepath.Join(baseDir, filename)
+	if _, err := os.Stat(targetFile); err == nil {
+		// Check if the path contains the container ID
+		if strings.Contains(baseDir, containerId) {
+			return targetFile, nil
+		}
+	}
+
+	// Read directory entries
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return "", err
+	}
+
+	// Search subdirectories
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		dirName := entry.Name()
+		// Skip if directory name doesn't contain relevant keywords
+		if !strings.Contains(dirName, "kubepods") &&
+			!strings.Contains(dirName, "pod") &&
+			!strings.Contains(dirName, "cri-containerd") &&
+			!strings.Contains(dirName, "docker") &&
+			!strings.Contains(dirName, containerId) {
+			continue
+		}
+
+		subDir := filepath.Join(baseDir, dirName)
+		if result, err := findCgroupFileRecursive(subDir, containerId, filename, maxDepth-1); err == nil {
+			return result, nil
+		}
+	}
+
+	return "", fmt.Errorf("file not found")
 }
 
 // detectContainerRuntime tries to detect if we're dealing with containerd or docker
@@ -120,6 +187,7 @@ func detectContainerRuntime(hostMountPath string) string {
 
 // Returns the first pid in a container.
 // Modified to support both Docker and containerd
+// Modified to support both cgroup v1 and v2
 func getPidForContainer(hostMountPath, id string) (int, error) {
 	logrus.Tracef("Looking for container %s PID", id)
 
@@ -128,6 +196,24 @@ func getPidForContainer(hostMountPath, id string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
+	// Detect if we're using cgroup v2
+	isCgroupV2 := false
+	if output, err := ioutil.ReadFile(hostMountPath + "/proc/mounts"); err == nil {
+		for _, line := range strings.Split(string(output), "\n") {
+			parts := strings.Split(line, " ")
+			if len(parts) >= 3 && parts[2] == "cgroup2" && parts[1] == cgroupRoot {
+				isCgroupV2 = true
+				logrus.Tracef("Using cgroup v2")
+				break
+			}
+		}
+	}
+	if !isCgroupV2 {
+		logrus.Tracef("Using cgroup v1")
+	}
+
+	logrus.Tracef("Cgroup root: %s, version: v%s", cgroupRoot, map[bool]string{true: "2", false: "1"}[isCgroupV2])
 
 	cgroupThis, err := getThisCgroup(hostMountPath, cgroupType)
 	if err != nil {
@@ -142,7 +228,57 @@ func getPidForContainer(hostMountPath, id string) (int, error) {
 	// Build comprehensive list of attempts for both containerd and docker
 	var attempts []string
 
-	// Containerd patterns (try these first as they're more specific)
+	// Cgroup v2 patterns (unified hierarchy)
+	var cgroupV2Attempts []string
+	if isCgroupV2 {
+		// Use shorter container ID for better matching
+		shortId := id
+		if len(id) > 12 {
+			shortId = id[:12]
+		}
+
+		cgroupV2Attempts = []string{
+			// cgroup v2 uses cgroup.procs instead of tasks
+			// Kubernetes with containerd - cgroup v2 patterns with full ID
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-besteffort.slice", "kubepods-besteffort-pod*.slice", "cri-containerd-"+id+"*.scope", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod*.slice", "cri-containerd-"+id+"*.scope", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-pod*.slice", "cri-containerd-"+id+"*.scope", "cgroup.procs"),
+
+			// Try with short ID
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-besteffort.slice", "kubepods-besteffort-pod*.slice", "cri-containerd-"+shortId+"*.scope", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-burstable.slice", "kubepods-burstable-pod*.slice", "cri-containerd-"+shortId+"*.scope", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-pod*.slice", "cri-containerd-"+shortId+"*.scope", "cgroup.procs"),
+
+			// Without QoS slice prefix (some k8s versions)
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-pod*.slice", "cri-containerd-"+id+".scope", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "kubepods-pod*.slice", "cri-containerd-"+shortId+".scope", "cgroup.procs"),
+
+			// Generic wildcard patterns
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "*", "*"+id+"*.scope", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "*", "*"+shortId+"*.scope", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "*", "cri-containerd-"+id+"*.scope", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "*", "cri-containerd-"+shortId+"*.scope", "cgroup.procs"),
+
+			// Nested pod slice patterns
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "*", "*", "cri-containerd-"+id+"*.scope", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods.slice", "*", "*", "cri-containerd-"+shortId+"*.scope", "cgroup.procs"),
+
+			// System slice patterns
+			filepath.Join(hostMountPath, cgroupRoot, "system.slice", "containerd.service", "*"+id+"*", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "system.slice", "containerd.service", "*"+shortId+"*", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "system.slice", "docker-"+id+"*.scope", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "system.slice", "docker-"+shortId+"*.scope", "cgroup.procs"),
+
+			// Top-level kubepods without .slice suffix (some distributions)
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods", "besteffort", "pod*", "*"+id+"*", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods", "burstable", "pod*", "*"+id+"*", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods", "pod*", "*"+id+"*", "cgroup.procs"),
+			filepath.Join(hostMountPath, cgroupRoot, "kubepods", "*", "pod*", "*"+id+"*", "cgroup.procs"),
+		}
+		attempts = append(attempts, cgroupV2Attempts...)
+	}
+
+	// Containerd patterns for cgroup v1 (try these first as they're more specific)
 	containerdAttempts := []string{
 		// Kubernetes with containerd - cgroup v1 patterns
 		filepath.Join(hostMountPath, cgroupRoot, "kubepods", "besteffort", "pod*", "*"+id+"*", "tasks"),
@@ -247,7 +383,28 @@ func getPidForContainer(hostMountPath, id string) (int, error) {
 	}
 
 	if filename == "" {
-		return 0, fmt.Errorf("Unable to find container: %v (tried %d different cgroup patterns)", id, len(attempts))
+		// Last resort: try recursive search for cgroup v2
+		if isCgroupV2 {
+			logrus.Tracef("Attempting recursive search for container %s", id)
+			shortId := id
+			if len(id) > 12 {
+				shortId = id[:12]
+			}
+
+			// Try with full ID first
+			if result, err := findCgroupFileRecursive(filepath.Join(hostMountPath, cgroupRoot), id, "cgroup.procs", 5); err == nil {
+				filename = result
+				logrus.Tracef("Found via recursive search: %s", filename)
+			} else if result, err := findCgroupFileRecursive(filepath.Join(hostMountPath, cgroupRoot), shortId, "cgroup.procs", 5); err == nil {
+				// Try with short ID
+				filename = result
+				logrus.Tracef("Found via recursive search with short ID: %s", filename)
+			}
+		}
+	}
+
+	if filename == "" {
+		return 0, fmt.Errorf("Unable to find container: %v (tried %d different cgroup patterns, cgroup version: v%s)", id, len(attempts), map[bool]string{true: "2", false: "1"}[isCgroupV2])
 	}
 
 	logrus.Tracef("Found cgroup file for container %s: %s", id, filename)
